@@ -6,6 +6,13 @@ or performing indenting on multiline output.
 import sys
 import textwrap
 
+
+class AbortError(SystemExit):
+    def __init__(self, statuscode, message):
+        SystemExit.__init__(self, statuscode)
+        self.message = message
+
+
 def abort(msg):
     """
     Abort execution, print ``msg`` to stderr and exit with error status (1.)
@@ -21,7 +28,7 @@ def abort(msg):
     if output.aborts:
         print >> sys.stderr, "\nFatal error: " + str(msg)
         print >> sys.stderr, "\nAborting."
-    sys.exit(1)
+    raise AbortError(1, msg)
 
 
 def warn(msg):
