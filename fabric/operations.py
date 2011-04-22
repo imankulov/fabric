@@ -851,7 +851,7 @@ def _run_command(command, shell=True, pty=True, combine_stderr=True,
     out.failed = False
     if status != 0:
         out.failed = True
-        msg = "%s() encountered an error (return code %s) while executing '%s'" % (which, status, command)
+        msg = "%s() encountered an error (return code %s, stdout '%s', stderr '%s') while executing '%s'" % (which, status, stdout, stderr, command)
         _handle_failure(message=msg)
 
     # Attach return code to output string so users who have set things to
