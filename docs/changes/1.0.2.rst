@@ -1,0 +1,16 @@
+========================
+Changes in version 1.0.2
+========================
+
+Bugfixes
+========
+
+* :issue:`337`: Fix logic bug in `~fabric.operations.put` preventing use of
+  ``mirror_local_mode``. Thanks to Roman Imankulov for catch & patch.
+
+
+Documentation
+=============
+
+* Updated the API documentation for `~fabric.context_managers.cd` to explicitly
+  point users to `~fabric.context_managers.lcd` for modifying local paths.
