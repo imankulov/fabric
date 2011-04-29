@@ -216,6 +216,14 @@ def test_shell_escape_escapes_backticks():
     eq_(_shell_escape(cmd), "touch test.pid && kill \`cat test.pid\`")
 
 
+def test_shell_escape_escapes_backslashes():
+    """
+    _shell_escape() escapes backslashes
+    """
+    cmd = r'echo "\""'
+    eq_(_shell_escape(cmd), r'echo \"\\\"\"')
+
+
 #
 # get() and put()
 #
