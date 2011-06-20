@@ -9,7 +9,7 @@ from nose.tools import raises
 
 from fabric.state import output, env
 from fabric.utils import AbortError, warn, indent, abort, puts, fastprint
-from fabric import utils # For patching
+from fabric import utils  # For patching
 from fabric.context_managers import settings
 from utils import mock_streams
 

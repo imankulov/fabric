@@ -13,12 +13,13 @@ from operator import add
 from optparse import OptionParser
 import os
 import sys
+import types
 
-from fabric import api # For checking callables against the API
-from fabric.contrib import console, files, project # Ditto
+from fabric import api, state  # For checking callables against the API, & easy mocking
+from fabric.contrib import console, files, project  # Ditto
 from fabric.network import denormalize, interpret_host_string, disconnect_all
-from fabric import state # For easily-mockable access to roles, env and etc
 from fabric.state import commands, connections, env_options
+from fabric.tasks import Task
 from fabric.utils import abort, indent
 
 
@@ -29,6 +30,26 @@ _internals = reduce(lambda x, y: x + filter(callable, vars(y).values()),
     _modules,
     []
 )
+
+# Module recursion cache
+class _ModuleCache(object):
+    """
+    Set-like object operating on modules and storing __name__s internally.
+    """
+    def __init__(self):
+        self.cache = set()
+
+    def __contains__(self, value):
+        return value.__name__ in self.cache
+
+    def add(self, value):
+        return self.cache.add(value.__name__)
+
+    def clear(self):
+        return self.cache.clear()
+
+_seen = _ModuleCache()
+
 
 def load_settings(path):
     """
@@ -139,9 +160,77 @@ def load_fabfile(path, importer=None):
     if index is not None:
         sys.path.insert(index + 1, directory)
         del sys.path[0]
-    # Return our two-tuple
-    tasks = dict(filter(is_task, vars(imported).items()))
+
+    # Actually load tasks
+    ret = load_tasks_from_module(imported)
+    # Clean up after ourselves
+    _seen.clear()
+    return ret
+
+
+def load_tasks_from_module(imported):
+    """
+    Handles loading all of the tasks for a given `imported` module
+    """
+    # Obey the use of <module>.__all__ if it is present
+    imported_vars = vars(imported)
+    if "__all__" in imported_vars:
+        imported_vars = [(name, imported_vars[name]) for name in \
+                         imported_vars if name in imported_vars["__all__"]]
+    else:
+        imported_vars = imported_vars.items()
+    # Return a two-tuple value.  First is the documentation, second is a
+    # dictionary of callables only (and don't include Fab operations or
+    # underscored callables)
+    new_style, classic = extract_tasks(imported_vars)
+    tasks = new_style if state.env.new_style_tasks else classic
     return imported.__doc__, tasks
+
+
+def is_task_module(a):
+    """
+    Determine if the provided value is a task module
+    """
+    #return (type(a) is types.ModuleType and
+    #        any(map(is_task_object, vars(a).values())))
+    if type(a) is types.ModuleType and a not in _seen:
+        # Flag module as seen
+        _seen.add(a)
+        # Signal that we need to check it out
+        return True
+
+
+def is_task_object(a):
+    """
+    Determine if the provided value is a ``Task`` object.
+
+    This returning True signals that all tasks within the fabfile
+    module must be Task objects.
+    """
+    return isinstance(a, Task) and a.use_task_objects
+
+
+def extract_tasks(imported_vars):
+    """
+    Handle extracting tasks from a given list of variables
+    """
+    new_style_tasks = {}
+    classic_tasks = {}
+    if 'new_style_tasks' not in state.env:
+        state.env.new_style_tasks = False
+    for tup in imported_vars:
+        name, obj = tup
+        if is_task_object(obj):
+            state.env.new_style_tasks = True
+            new_style_tasks[obj.name] = obj
+        elif is_task(tup):
+            classic_tasks[name] = obj
+        elif is_task_module(obj):
+            module_docs, module_tasks = load_tasks_from_module(obj)
+            for task_name, task in module_tasks.items():
+                new_style_tasks["%s.%s" % (name, task_name)] = task
+    return (new_style_tasks, classic_tasks)
+
 
 
 def parse_options():
@@ -158,7 +247,8 @@ def parse_options():
 
     #
     # Define options that don't become `env` vars (typically ones which cause
-    # Fabric to do something other than its normal execution, such as --version)
+    # Fabric to do something other than its normal execution, such as
+    # --version)
     #
 
     # Version number (optparse gives you --version but we have to do it
@@ -230,7 +320,8 @@ def list_commands(docstring):
         output = None
         # Print first line of docstring
         func = commands[name]
-        if func.__doc__:
+        docstring = func.__doc__
+        if docstring and type(docstring) in types.StringTypes:
             lines = filter(None, func.__doc__.splitlines())
             first_line = lines[0].strip()
             # Truncate it if it's longer than N chars
@@ -286,7 +377,7 @@ def _escape_split(sep, argstr):
         return argstr.split(sep)
 
     before, _, after = argstr.partition(escaped_sep)
-    startlist = before.split(sep) # a regular split is fine here
+    startlist = before.split(sep)  # a regular split is fine here
     unfinished = startlist[-1]
     startlist = startlist[:-1]
 
@@ -297,7 +388,7 @@ def _escape_split(sep, argstr):
     # part of the string sent in recursion is the rest of the escaped value.
     unfinished += sep + endlist[0]
 
-    return startlist + [unfinished] + endlist[1:] # put together all the parts
+    return startlist + [unfinished] + endlist[1:]  # put together all the parts
 
 
 def parse_arguments(arguments):
@@ -312,13 +403,14 @@ def parse_arguments(arguments):
         kwargs = {}
         hosts = []
         roles = []
+        exclude_hosts = []
         if ':' in cmd:
             cmd, argstr = cmd.split(':', 1)
             for pair in _escape_split(',', argstr):
                 k, _, v = pair.partition('=')
                 if _:
-                    # Catch, interpret host/hosts/role/roles kwargs
-                    if k in ['host', 'hosts', 'role', 'roles']:
+                    # Catch, interpret host/hosts/role/roles/exclude_hosts kwargs
+                    if k in ['host', 'hosts', 'role', 'roles','exclude_hosts']:
                         if k == 'host':
                             hosts = [v.strip()]
                         elif k == 'hosts':
@@ -327,12 +419,14 @@ def parse_arguments(arguments):
                             roles = [v.strip()]
                         elif k == 'roles':
                             roles = [x.strip() for x in v.split(';')]
+                        elif k == 'exclude_hosts':
+                            exclude_hosts = [x.strip() for x in v.split(';')]
                     # Otherwise, record as usual
                     else:
                         kwargs[k] = v
                 else:
                     args.append(k)
-        cmds.append((cmd, args, kwargs, hosts, roles))
+        cmds.append((cmd, args, kwargs, hosts, roles, exclude_hosts))
     return cmds
 
 
@@ -343,7 +437,7 @@ def parse_remainder(arguments):
     return ' '.join(arguments)
 
 
-def _merge(hosts, roles):
+def _merge(hosts, roles, exclude=[]):
     """
     Merge given host and role lists into one list of deduped hosts.
     """
@@ -362,9 +456,15 @@ def _merge(hosts, roles):
         if callable(value):
             value = value()
         role_hosts += value
-    # Return deduped combo of hosts and role_hosts
-    return list(set(_clean_hosts(hosts + role_hosts)))
 
+    # Return deduped combo of hosts and role_hosts, preserving order within
+    # them (vs using set(), which may lose ordering).
+    cleaned_hosts = _clean_hosts(list(hosts) + list(role_hosts))
+    all_hosts = []
+    for host in cleaned_hosts:
+        if host not in all_hosts:
+            all_hosts.append(host)
+    return all_hosts
 
 def _clean_hosts(host_list):
     """
@@ -372,8 +472,7 @@ def _clean_hosts(host_list):
     """
     return [host.strip() for host in host_list]
 
-
-def get_hosts(command, cli_hosts, cli_roles):
+def get_hosts(command, cli_hosts, cli_roles, cli_exclude_hosts):
     """
     Return the host list the given command should be using.
 
@@ -382,18 +481,18 @@ def get_hosts(command, cli_hosts, cli_roles):
     """
     # Command line per-command takes precedence over anything else.
     if cli_hosts or cli_roles:
-        return _merge(cli_hosts, cli_roles)
+        return _merge(cli_hosts, cli_roles, cli_exclude_hosts)
     # Decorator-specific hosts/roles go next
     func_hosts = getattr(command, 'hosts', [])
     func_roles = getattr(command, 'roles', [])
+    func_exclude_hosts = getattr(command, 'exclude_hosts', [])
     if func_hosts or func_roles:
-        return _merge(func_hosts, func_roles)
+        return _merge(func_hosts, func_roles, func_exclude_hosts)
     # Finally, the env is checked (which might contain globally set lists from
     # the CLI or from module-level code). This will be the empty list if these
     # have not been set -- which is fine, this method should return an empty
     # list if no hosts have been set anywhere.
-    return _merge(state.env['hosts'], state.env['roles'])
-
+    return _merge(state.env['hosts'], state.env['roles'], state.env['exclude_hosts'])
 
 def update_output_levels(show, hide):
     """
@@ -430,8 +529,8 @@ def main():
         for option in env_options:
             state.env[option.dest] = getattr(options, option.dest)
 
-        # Handle --hosts, --roles (comma separated string => list)
-        for key in ['hosts', 'roles']:
+        # Handle --hosts, --roles, --exclude-hosts (comma separated string => list)
+        for key in ['hosts', 'roles', 'exclude_hosts']:
             if key in state.env and isinstance(state.env[key], str):
                 state.env[key] = state.env[key].split(',')
 
@@ -495,7 +594,7 @@ def main():
         # If user didn't specify any commands to run, show help
         if not (arguments or remainder_arguments):
             parser.print_help()
-            sys.exit(0) # Or should it exit with error (1)?
+            sys.exit(0)  # Or should it exit with error (1)?
 
         # Parse arguments into commands to run (plus args/kwargs/hosts)
         commands_to_run = parse_arguments(arguments)
@@ -524,15 +623,16 @@ def main():
             names = ", ".join(x[0] for x in commands_to_run)
             print("Commands to run: %s" % names)
 
+
         # At this point all commands must exist, so execute them in order.
-        for name, args, kwargs, cli_hosts, cli_roles in commands_to_run:
+        for name, args, kwargs, cli_hosts, cli_roles, cli_exclude_hosts in commands_to_run:
             # Get callable by itself
             command = commands[name]
             # Set current command name (used for some error messages)
             state.env.command = name
             # Set host list (also copy to env)
             state.env.all_hosts = hosts = get_hosts(
-                command, cli_hosts, cli_roles)
+                command, cli_hosts, cli_roles, cli_exclude_hosts)
             # If hosts found, execute the function on each host in turn
             for host in hosts:
                 # Preserve user

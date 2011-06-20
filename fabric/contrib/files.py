@@ -6,8 +6,10 @@ from __future__ import with_statement
 
 import hashlib
 import tempfile
+import types
 import re
 import os
+from StringIO import StringIO
 
 from fabric.api import *
 
@@ -49,7 +51,8 @@ def first(*args, **kwargs):
 
 
 def upload_template(filename, destination, context=None, use_jinja=False,
-    template_dir=None, use_sudo=False):
+    template_dir=None, use_sudo=False, backup=True, mirror_local_mode=False,
+    mode=None):
     """
     Render and upload a template text file to a remote host.
 
@@ -62,24 +65,37 @@ def upload_template(filename, destination, context=None, use_jinja=False,
     templating library available, Jinja will be used to render the template
     instead. Templates will be loaded from the invoking user's current working
     directory by default, or from ``template_dir`` if given.
-    
+
     The resulting rendered file will be uploaded to the remote file path
-    ``destination`` (which should include the desired remote filename.) If the
-    destination file already exists, it will be renamed with a ``.bak``
-    extension.
+    ``destination``.  If the destination file already exists, it will be
+    renamed with a ``.bak`` extension unless ``backup=False`` is specified.
 
     By default, the file will be copied to ``destination`` as the logged-in
     user; specify ``use_sudo=True`` to use `sudo` instead.
-    """
-    basename = os.path.basename(filename)
-    temp_destination = '/tmp/' + basename
 
-    # This temporary file should not be automatically deleted on close, as we
-    # need it there to upload it (Windows locks the file for reading while
-    # open).
-    tempfile_fd, tempfile_name = tempfile.mkstemp()
-    output = open(tempfile_name, "w+b")
-    # Init
+    The ``mirror_local_mode`` and ``mode`` kwargs are passed directly to an
+    internal `~fabric.operations.put` call; please see its documentation for
+    details on these two options.
+
+    .. versionchanged:: 1.1
+        Added the ``backup``, ``mirror_local_mode`` and ``mode`` kwargs.
+    """
+    func = use_sudo and sudo or run
+    # Normalize destination to be an actual filename, due to using StringIO
+    with settings(hide('everything'), warn_only=True):
+        if func('test -d %s' % destination).succeeded:
+            sep = "" if destination.endswith('/') else "/"
+            destination += sep + os.path.basename(filename)
+
+    # Use mode kwarg to implement mirror_local_mode, again due to using
+    # StringIO
+    if mirror_local_mode and mode is None:
+        mode = os.stat(filename).st_mode
+        # To prevent put() from trying to do this
+        # logic itself
+        mirror_local_mode = False
+
+    # Process template
     text = None
     if use_jinja:
         try:
@@ -93,33 +109,27 @@ def upload_template(filename, destination, context=None, use_jinja=False,
             text = inputfile.read()
         if context:
             text = text % context
-    output.write(text)
-    output.close()
+
+    # Back up original file
+    if backup and exists(destination):
+        func("cp %s{,.bak}" % destination)
 
     # Upload the file.
-    put(tempfile_name, temp_destination)
-    os.close(tempfile_fd)
-    os.remove(tempfile_name)
-
-    func = use_sudo and sudo or run
-    # Back up any original file (need to do figure out ultimate destination)
-    to_backup = destination
-    with settings(hide('everything'), warn_only=True):
-        # Is destination a directory?
-        if func('test -f %s' % to_backup).failed:
-            # If so, tack on the filename to get "real" destination
-            to_backup = destination + '/' + basename
-    if exists(to_backup):
-        func("cp %s %s.bak" % (to_backup, to_backup))
-    # Actually move uploaded template to destination
-    func("mv %s %s" % (temp_destination, destination))
+    put(
+        local_path=StringIO(text),
+        remote_path=destination,
+        use_sudo=use_sudo,
+        mirror_local_mode=mirror_local_mode,
+        mode=mode
+    )
 
 
-def sed(filename, before, after, limit='', use_sudo=False, backup='.bak'):
+def sed(filename, before, after, limit='', use_sudo=False, backup='.bak',
+    flags=''):
     """
     Run a search-and-replace on ``filename`` with given regex patterns.
 
-    Equivalent to ``sed -i<backup> -r -e "/<limit>/ s/<before>/<after>/g
+    Equivalent to ``sed -i<backup> -r -e "/<limit>/ s/<before>/<after>/<flags>g
     <filename>"``.
 
     For convenience, ``before`` and ``after`` will automatically escape forward
@@ -131,6 +141,14 @@ def sed(filename, before, after, limit='', use_sudo=False, backup='.bak'):
 
     `sed` will pass ``shell=False`` to `run`/`sudo`, in order to avoid problems
     with many nested levels of quotes and backslashes.
+
+    Other options may be specified with sed-compatible regex flags -- for
+    example, to make the search and replace case insensitive, specify
+    ``flags="i"``. The ``g`` flag is always specified regardless, so you do not
+    need to remember to include it when overriding this parameter.
+
+    .. versionadded:: 1.1
+        The ``flags`` parameter.
     """
     func = use_sudo and sudo or run
     # Characters to be escaped in both
@@ -144,6 +162,7 @@ def sed(filename, before, after, limit='', use_sudo=False, backup='.bak'):
     if limit:
         limit = r'/%s/ ' % limit
     # Test the OS because of differences between sed versions
+
     with hide('running', 'stdout'):
         platform = run("uname")
     if platform in ('NetBSD', 'OpenBSD'):
@@ -154,13 +173,13 @@ def sed(filename, before, after, limit='', use_sudo=False, backup='.bak'):
         tmp = "/tmp/%s" % hasher.hexdigest()
         # Use temp file to work around lack of -i
         expr = r"""cp -p %(filename)s %(tmp)s \
-&& sed -r -e '%(limit)ss/%(before)s/%(after)s/g' %(filename)s > %(tmp)s \
+&& sed -r -e '%(limit)ss/%(before)s/%(after)s/%(flags)sg' %(filename)s > %(tmp)s \
 && cp -p %(filename)s %(filename)s%(backup)s \
 && mv %(tmp)s %(filename)s"""
         command = expr % locals()
     else:
-        expr = r"sed -i%s -r -e '%ss/%s/%s/g' %s"
-        command = expr % (backup, limit, before, after, filename)
+        expr = r"sed -i%s -r -e '%ss/%s/%s/%sg' %s"
+        command = expr % (backup, limit, before, after, flags, filename)
     return func(command, shell=False)
 
 
@@ -211,7 +230,7 @@ def comment(filename, regex, use_sudo=False, char='#', backup='.bak'):
     sometimes do when inserted by hand. Neither will they have a trailing space
     unless you specify e.g. ``char='# '``.
 
-    .. note:: 
+    .. note::
 
         In order to preserve the line being commented out, this function will
         wrap your ``regex`` argument in parentheses, so you don't need to. It
@@ -299,7 +318,7 @@ def append(filename, text, use_sudo=False, partial=False, escape=True):
     """
     func = use_sudo and sudo or run
     # Normalize non-list input to be a list
-    if isinstance(text, str):
+    if isinstance(text, types.StringTypes):
         text = [text]
     for line in text:
         regex = '^' + re.escape(line) + ('' if partial else '$')

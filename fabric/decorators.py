@@ -1,9 +1,20 @@
 """
 Convenience decorators for use in fabfiles.
 """
+from __future__ import with_statement
 
 from functools import wraps
 from types import StringTypes
+
+from fabric import tasks
+from .context_managers import settings
+
+
+def task(func):
+    """
+    Decorator declaring the wrapped function as a :ref:`new-style task <new-style-tasks>`.
+    """
+    return tasks.WrappedCallableTask(func)
 
 
 def hosts(*host_list):
@@ -29,6 +40,7 @@ def hosts(*host_list):
         Allow a single, iterable argument (``@hosts(iterable)``) to be used
         instead of requiring ``@hosts(*iterable)``.
     """
+
     def attach_hosts(func):
         @wraps(func)
         def inner_decorator(*args, **kwargs):
@@ -100,3 +112,29 @@ def runs_once(func):
             decorated.return_value = func(*args, **kwargs)
         return decorated.return_value
     return decorated
+
+
+def with_settings(**kw_settings):
+    """
+    Decorator equivalent of ``fabric.context_managers.settings``.
+
+    Allows you to wrap an entire function as if it was called inside a block
+    with the ``settings`` context manager. This may be useful if you know you
+    want a given setting applied to an entire function body, or wish to
+    retrofit old code without indenting everything.
+
+    For example, to turn aborts into warnings for an entire task function::
+
+        @with_settings(warn_only=True)
+        def foo():
+            ...
+
+    .. seealso:: `~fabric.context_managers.settings`
+    .. versionadded:: 1.1
+    """
+    def outer(func):
+        def inner(*args, **kwargs):
+            with settings(**kw_settings):
+                return func(*args, **kwargs)
+        return inner
+    return outer
