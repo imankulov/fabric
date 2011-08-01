@@ -6,7 +6,7 @@ import os
 import sys
 from optparse import make_option
 
-from fabric.network import HostConnectionCache
+from fabric.network import HostConnectionCache, ssh
 from fabric.version import get_version
 
 
@@ -315,7 +315,15 @@ def default_channel():
     """
     Return a channel object based on ``env.host_string``.
     """
-    chan = connections[env.host_string].get_transport().open_session()
+    try:
+        chan = connections[env.host_string].get_transport().open_session()
+    except ssh.SSHException as err:
+        if str(err) == 'SSH session not active':
+            connections[env.host_string].close()
+            del connections[env.host_string]
+            chan = connections[env.host_string].get_transport().open_session()
+        else:
+            raise
     chan.input_enabled = True
     return chan
 
