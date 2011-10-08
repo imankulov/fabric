@@ -6,7 +6,7 @@ import getpass
 import sys
 
 import paramiko
-from nose.tools import with_setup
+from nose.tools import with_setup, raises, ok_
 from fudge import (Fake, clear_calls, clear_expectations, patch_object, verify,
     with_patched_object, patched_context, with_fakes)
 
@@ -16,7 +16,7 @@ from fabric.network import (HostConnectionCache, join_host_strings, normalize,
 from fabric.io import output_loop
 import fabric.network  # So I can call patch_object correctly. Sigh.
 from fabric.state import env, output, _get_system_username
-from fabric.operations import run, sudo
+from fabric.operations import run, sudo, prompt
 
 from utils import *
 from server import (server, PORT, RESPONSES, PASSWORDS, CLIENT_PRIVKEY, USER,
@@ -134,6 +134,25 @@ class TestNetwork(FabricTest):
             TestNetwork.check_connection_calls.description = description
             yield TestNetwork.check_connection_calls, host_strings, num_calls
 
+    def test_connection_cache_deletion(self):
+        """
+        HostConnectionCache should delete correctly w/ non-full keys
+        """
+        hcc = HostConnectionCache()
+        fake = Fake('connect', callable=True)
+        with patched_context('fabric.network', 'connect', fake):
+            for host_string in ('hostname', 'user@hostname',
+                'user@hostname:222'):
+                # Prime
+                hcc[host_string]
+                # Test
+                ok_(host_string in hcc)
+                # Delete
+                del hcc[host_string]
+                # Test
+                ok_(host_string not in hcc)
+
+
     #
     # Connection loop flow
     #
@@ -149,6 +168,43 @@ class TestNetwork(FabricTest):
         with password_response(PASSWORDS[env.user], times_called=1):
             cache = HostConnectionCache()
             cache[env.host_string]
+
+
+    @raises(SystemExit)
+    @with_patched_object(output, 'aborts', False)
+    def test_aborts_on_prompt_with_abort_on_prompt(self):
+        """
+        abort_on_prompt=True should abort when prompt() is used
+        """
+        env.abort_on_prompts = True
+        prompt("This will abort")
+
+
+    @server()
+    @raises(SystemExit)
+    @with_patched_object(output, 'aborts', False)
+    def test_aborts_on_password_prompt_with_abort_on_prompt(self):
+        """
+        abort_on_prompt=True should abort when password prompts occur
+        """
+        env.password = None
+        env.abort_on_prompts = True
+        with password_response(PASSWORDS[env.user], times_called=1):
+            cache = HostConnectionCache()
+            cache[env.host_string]
+
+
+    @mock_streams('stdout')
+    @server()
+    def test_does_not_abort_with_password_and_host_with_abort_on_prompt(self):
+        """
+        abort_on_prompt=True should not abort if no prompts are needed
+        """
+        env.abort_on_prompts = True
+        env.password = PASSWORDS[env.user]
+        # env.host_string is automatically filled in when using server()
+        run("ls /simple")
+
 
     @mock_streams('stdout')
     @server()

@@ -208,8 +208,22 @@ env_options = [
         action='store_false',
         default=True,
         help="do not use pseudo-terminal in run/sudo"
-    )
+    ),
 
+    # Abort on prompting flag
+    make_option('--abort-on-prompts',
+        action='store_true',
+        default=False,
+        help="Abort instead of prompting (for password, host, etc)"
+    ),
+
+    # Keepalive
+    make_option('--keepalive',
+        dest='keepalive',
+        type=int,
+        default=0,
+        help="enables a keepalive every n seconds"
+    ),
 ]
 
 
@@ -277,7 +291,9 @@ def default_channel():
     """
     Return a channel object based on ``env.host_string``.
     """
-    return connections[env.host_string].get_transport().open_session()
+    chan = connections[env.host_string].get_transport().open_session()
+    chan.input_enabled = True
+    return chan
 
 
 #

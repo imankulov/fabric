@@ -104,6 +104,23 @@ as `~fabric.context_managers.cd`.
 Note that many of these may be set via ``fab``'s command-line switches -- see
 :doc:`fab` for details. Cross-links will be provided where appropriate.
 
+.. _abort-on-prompts:
+
+``abort_on_prompts``
+--------------------
+
+**Default:** ``False``
+
+When ``True``, Fabric will run in a non-interactive mode, calling
+`~fabric.utils.abort` anytime it would normally prompt the user for input (such
+as password prompts, "What host to connect to?" prompts, fabfile invocation of
+`~fabric.operations.prompt`, and so forth.) This allows users to ensure a Fabric
+session will always terminate cleanly instead of blocking on user input forever
+when unforeseen circumstances arise.
+
+.. versionadded:: 1.1
+.. seealso:: :option:`--abort-on-prompts`
+
 ``all_hosts``
 -------------
 
@@ -241,6 +258,20 @@ purposes only.
 The global host list used when composing per-task host lists.
 
 .. seealso:: :doc:`execution`
+
+.. _keepalive:
+
+``keepalive``
+-------------
+
+**Default:** ``0`` (i.e. no keepalive)
+
+An integer specifying an SSH keepalive interval to use; basically maps to the
+SSH config option ``ClientAliveInterval``. Useful if you find connections are
+timing out due to meddlesome network hardware or what have you.
+
+.. seealso:: :option:`--keepalive`
+.. versionadded:: 1.1
 
 .. _key-filename:
 
@@ -407,7 +438,7 @@ Value used as shell wrapper when executing commands with e.g.
 "<command goes here>"`` -- e.g. the default uses Bash's ``-c`` option which
 takes a command string as its value.
 
-.. seealso:: :doc:`execution`
+.. seealso:: :ref:`FAQ on bash as default shell <faq-bash>`, :doc:`execution`
 
 ``sudo_prompt``
 ---------------

@@ -208,26 +208,31 @@ def line_prefix(prefix, string):
     return "\n".join(prefix + x for x in string.splitlines())
 
 
-def eq_(a, b, msg=None):
+def eq_(result, expected, msg=None):
     """
     Shadow of the Nose builtin which presents easier to read multiline output.
     """
-    default_msg = """
-Expected:
-%s
-
-Got:
-%s
+    params = {'expected': expected, 'result': result}
+    aka = """
 
 --------------------------------- aka -----------------------------------------
 
 Expected:
-%r
+%(expected)r
 
 Got:
-%r
-""" % (a, b, a, b)
-    assert a == b, msg or default_msg
+%(result)r
+""" % params
+    default_msg = """
+Expected:
+%(expected)s
+
+Got:
+%(result)s
+""" % params
+    if (repr(result) != str(result)) or (repr(expected) != str(expected)):
+        default_msg += aka
+    assert result == expected, msg or default_msg
 
 
 def eq_contents(path, text):
@@ -251,3 +256,7 @@ def patched_env(updates):
         new_env = deepcopy(env).update(updates)
         return with_patched_object('fabric.state', 'env', new_env)
     return wrapper
+
+
+def fabfile(name):
+    return os.path.join(os.path.dirname(__file__), 'support', name)

@@ -90,6 +90,13 @@ below.
 
     .. versionadded:: 0.9.1
 
+.. cmdoption:: --abort-on-prompts
+
+    Sets :ref:`env.abort_on_prompts <abort-on-prompts>` to ``True``, forcing
+    Fabric to abort whenever it would prompt for input.
+
+    .. versionadded:: 1.1
+
 .. cmdoption:: -c RCFILE, --config=RCFILE
 
     Sets :ref:`env.rcfile <rcfile>` to the given file path, which Fabric will
@@ -113,7 +120,17 @@ below.
     alternately an explicit file path to load as the fabfile (e.g.
     ``/path/to/my/fabfile.py``.)
 
-.. seealso:: :doc:`fabfiles`
+    .. seealso:: :doc:`fabfiles`
+
+.. cmdoption:: -F LIST_FORMAT, --list-format=LIST_FORMAT
+
+    Allows control over the output format of :option:`--list <-l>`. ``short`` is
+    equivalent to :option:`--shortlist`, ``normal`` is the same as simply
+    omitting this option entirely (i.e. the default), and ``nested`` prints out
+    a nested namespace tree.
+
+    .. versionadded:: 1.1
+    .. seealso:: :option:`--shortlist`, :option:`--list <-l>`
 
 .. cmdoption:: -h, --help
 
@@ -151,6 +168,12 @@ below.
 
     .. versionadded:: 0.9.1
 
+.. cmdoption:: --keepalive=KEEPALIVE
+
+    Sets :ref:`env.keepalive <keepalive>` to the given (integer) value, specifying an SSH keepalive interval.
+
+    .. versionadded:: 1.1
+
 .. cmdoption:: -l, --list
 
     Imports a fabfile as normal, but then prints a list of all discovered tasks
@@ -159,7 +182,7 @@ below.
 
     .. versionchanged:: 0.9.1
         Added docstring to output.
-    .. seealso:: :option:`--shortlist`
+    .. seealso:: :option:`--shortlist`, :option:`--list-format <-F>`
 
 .. cmdoption:: -p PASSWORD, --password=PASSWORD
 

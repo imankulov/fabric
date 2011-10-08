@@ -1,22 +1,29 @@
 from __future__ import with_statement
 
-import sys
 import copy
+from operator import isMappingType
+import os
+import sys
 from contextlib import contextmanager
 
-from fudge import Fake
+from fudge import Fake, patched_context
 from nose.tools import ok_, eq_, raises
 
 from fabric.decorators import hosts, roles, task
 from fabric.main import (get_hosts, parse_arguments, _merge, _escape_split,
-        load_fabfile)
-
+        load_fabfile as _load_fabfile, list_commands, _task_names, _crawl,
+        crawl, COMMANDS_HEADER, NESTED_REMINDER)
 import fabric.state
 from fabric.state import _AttributeDict
+from fabric.tasks import Task
 
-from utils import mock_streams, patched_env
-import os
-import sys
+from utils import mock_streams, patched_env, eq_, FabricTest, fabfile
+
+
+# Stupid load_fabfile wrapper to hide newly added return value.
+# WTB more free time to rewrite all this with objects :)
+def load_fabfile(*args, **kwargs):
+    return _load_fabfile(*args, **kwargs)[:2]
 
 
 #
@@ -172,8 +179,7 @@ def test_hosts_decorator_overrides_env_hosts_with_task_decorator_last():
     assert 'foo' not in get_hosts(command, [], [])
 
 
-@patched_env({'hosts': [' foo ', 'bar '], 'roles': [],
-        'exclude_hosts':[]})
+@patched_env({'hosts': [' foo ', 'bar '], 'roles': [], 'exclude_hosts': []})
 def test_hosts_stripped_env_hosts():
     """
     Make sure hosts defined in env.hosts are cleaned of extra spaces
@@ -222,6 +228,24 @@ def test_roles_decorator_expands_single_iterable():
         pass
 
     eq_(command.roles, role_list)
+
+
+#
+# Host exclusion
+#
+
+def dummy(): pass
+
+def test_get_hosts_excludes_cli_exclude_hosts_from_cli_hosts():
+    assert 'foo' not in get_hosts(dummy, ['foo', 'bar'], [], ['foo'])
+
+def test_get_hosts_excludes_cli_exclude_hosts_from_decorator_hosts():
+    assert 'foo' not in get_hosts(hosts('foo', 'bar')(dummy), [], [], ['foo'])
+
+@patched_env({'hosts': ['foo', 'bar'], 'exclude_hosts': ['foo']})
+def test_get_hosts_excludes_global_exclude_hosts_from_global_hosts():
+    assert 'foo' not in get_hosts(dummy, [], [], [])
+
 
 
 #
@@ -291,9 +315,6 @@ def test_load_fabfile_should_not_remove_real_path_elements():
 # Namespacing and new-style tasks
 #
 
-def fabfile(name):
-    return os.path.join(os.path.dirname(__file__), 'support', name)
-
 @contextmanager
 def path_prefix(module):
     i = 0
@@ -302,69 +323,259 @@ def path_prefix(module):
     sys.path.pop(i)
 
 
-def test_implicit_discovery():
-    """
-    Default to automatically collecting all tasks in a fabfile module
-    """
-    implicit = fabfile("implicit_fabfile.py")
-    with path_prefix(implicit):
-        docs, funcs = load_fabfile(implicit)
-        ok_(len(funcs) == 2)
-        ok_("foo" in funcs)
-        ok_("bar" in funcs)
+class TestTaskAliases(FabricTest):
+    def test_flat_alias(self):
+        f = fabfile("flat_alias.py")
+        with path_prefix(f):
+            docs, funcs = load_fabfile(f)
+            eq_(len(funcs), 2)
+            ok_("foo" in funcs)
+            ok_("foo_aliased" in funcs)
+
+    def test_nested_alias(self):
+        f = fabfile("nested_alias.py")
+        with path_prefix(f):
+            docs, funcs = load_fabfile(f)
+            ok_("nested" in funcs)
+            eq_(len(funcs["nested"]), 2)
+            ok_("foo" in funcs["nested"])
+            ok_("foo_aliased" in funcs["nested"])
+
+    def test_flat_aliases(self):
+        f = fabfile("flat_aliases.py")
+        with path_prefix(f):
+            docs, funcs = load_fabfile(f)
+            eq_(len(funcs), 3)
+            ok_("foo" in funcs)
+            ok_("foo_aliased" in funcs)
+            ok_("foo_aliased_two" in funcs)
+
+    def test_nested_alias(self):
+        f = fabfile("nested_aliases.py")
+        with path_prefix(f):
+            docs, funcs = load_fabfile(f)
+            ok_("nested" in funcs)
+            eq_(len(funcs["nested"]), 3)
+            ok_("foo" in funcs["nested"])
+            ok_("foo_aliased" in funcs["nested"])
+            ok_("foo_aliased_two" in funcs["nested"])
 
 
-def test_explicit_discovery():
-    """
-    If __all__ is present, only collect the tasks it specifies
-    """
-    explicit = fabfile("explicit_fabfile.py")
-    with path_prefix(explicit):
-        docs, funcs = load_fabfile(explicit)
-        ok_(len(funcs) == 1)
-        ok_("foo" in funcs)
-        ok_("bar" not in funcs)
+class TestNamespaces(FabricTest):
+    def setup(self):
+        # Parent class preserves current env
+        super(TestNamespaces, self).setup()
+        # Reset new-style-tests flag so running tests via Fab itself doesn't
+        # muck with it.
+        import fabric.state
+        if 'new_style_tasks' in fabric.state.env:
+            del fabric.state.env['new_style_tasks']
+
+    def test_implicit_discovery(self):
+        """
+        Default to automatically collecting all tasks in a fabfile module
+        """
+        implicit = fabfile("implicit_fabfile.py")
+        with path_prefix(implicit):
+            docs, funcs = load_fabfile(implicit)
+            eq_(len(funcs), 2)
+            ok_("foo" in funcs)
+            ok_("bar" in funcs)
+
+    def test_explicit_discovery(self):
+        """
+        If __all__ is present, only collect the tasks it specifies
+        """
+        explicit = fabfile("explicit_fabfile.py")
+        with path_prefix(explicit):
+            docs, funcs = load_fabfile(explicit)
+            eq_(len(funcs), 1)
+            ok_("foo" in funcs)
+            ok_("bar" not in funcs)
+
+    def test_should_load_decorated_tasks_only_if_one_is_found(self):
+        """
+        If any new-style tasks are found, *only* new-style tasks should load
+        """
+        module = fabfile('decorated_fabfile.py')
+        with path_prefix(module):
+            docs, funcs = load_fabfile(module)
+            eq_(len(funcs), 1)
+            ok_('foo' in funcs)
+
+    def test_class_based_tasks_are_found_with_proper_name(self):
+        """
+        Wrapped new-style tasks should preserve their function names
+        """
+        module = fabfile('decorated_fabfile_with_classbased_task.py')
+        from fabric.state import env
+        with path_prefix(module):
+            docs, funcs = load_fabfile(module)
+            eq_(len(funcs), 1)
+            ok_('foo' in funcs)
+
+    def test_recursion_steps_into_nontask_modules(self):
+        """
+        Recursive loading will continue through modules with no tasks
+        """
+        module = fabfile('deep')
+        with path_prefix(module):
+            docs, funcs = load_fabfile(module)
+            eq_(len(funcs), 1)
+            ok_('submodule.subsubmodule.deeptask' in _task_names(funcs))
+
+    def test_newstyle_task_presence_skips_classic_task_modules(self):
+        """
+        Classic-task-only modules shouldn't add tasks if any new-style tasks exist
+        """
+        module = fabfile('deep')
+        with path_prefix(module):
+            docs, funcs = load_fabfile(module)
+            eq_(len(funcs), 1)
+            ok_('submodule.classic_task' not in _task_names(funcs))
 
 
-def test_should_load_decorated_tasks_only_if_one_is_found():
-    """
-    If any new-style tasks are found, *only* new-style tasks should load
-    """
-    module = fabfile('decorated_fabfile.py')
+#
+# --list output
+#
+
+def eq_output(docstring, format_, expected):
+    return eq_(
+        "\n".join(list_commands(docstring, format_)),
+        expected
+    )
+
+def list_output(module, format_, expected):
+    module = fabfile(module)
     with path_prefix(module):
-        docs, funcs = load_fabfile(module)
-        eq_(1, len(funcs))
-        ok_('foo' in funcs)
+        docstring, tasks = load_fabfile(module)
+        with patched_context(fabric.state, 'commands', tasks):
+            eq_output(docstring, format_, expected)
+
+def test_list_output():
+    lead = ":\n\n    "
+    normal_head = COMMANDS_HEADER + lead
+    nested_head = COMMANDS_HEADER + NESTED_REMINDER + lead
+    for desc, module, format_, expected in (
+        ("shorthand (& with namespacing)", 'deep', 'short', "submodule.subsubmodule.deeptask"),
+        ("normal (& with namespacing)", 'deep', 'normal', normal_head + "submodule.subsubmodule.deeptask"),
+        ("normal (with docstring)", 'docstring', 'normal', normal_head + "foo  Foos!"),
+        ("nested (leaf only)", 'deep', 'nested', nested_head + """submodule:
+        subsubmodule:
+            deeptask"""),
+        ("nested (full)", 'tree', 'nested', nested_head + """build_docs
+    deploy
+    db:
+        migrate
+    system:
+        install_package
+        debian:
+            update_apt"""),
+    ):
+        list_output.description = "--list output: %s" % desc
+        yield list_output, module, format_, expected
+        del list_output.description
 
 
-def test_class_based_tasks_are_found_with_proper_name():
-    """
-    Wrapped new-style tasks should preserve their function names
-    """
-    module = fabfile('decorated_fabfile_with_classbased_task.py')
-    with path_prefix(module):
-        docs, funcs = load_fabfile(module)
-        eq_(1, len(funcs))
-        ok_('foo' in funcs)
+def name_to_task(name):
+    t = Task()
+    t.name = name
+    return t
+
+def strings_to_tasks(d):
+    ret = {}
+    for key, value in d.iteritems():
+        if isMappingType(value):
+            val = strings_to_tasks(value)
+        else:
+            val = name_to_task(value)
+        ret[key] = val
+    return ret
+
+def test_task_names():
+    for desc, input_, output in (
+        ('top level (single)', {'a': 5}, ['a']),
+        ('top level (multiple, sorting)', {'a': 5, 'b': 6}, ['a', 'b']),
+        ('just nested', {'a': {'b': 5}}, ['a.b']),
+        ('mixed', {'a': 5, 'b': {'c': 6}}, ['a', 'b.c']),
+        ('top level comes before nested', {'z': 5, 'b': {'c': 6}}, ['z', 'b.c']),
+        ('peers sorted equally', {'z': 5, 'b': {'c': 6}, 'd': {'e': 7}}, ['z', 'b.c', 'd.e']),
+        (
+            'complex tree',
+            {
+                'z': 5,
+                'b': {
+                    'c': 6,
+                    'd': {
+                        'e': {
+                            'f': '7'
+                        }
+                    },
+                    'g': 8
+                },
+                'h': 9,
+                'w': {
+                    'y': 10
+                }
+            },
+            ['h', 'z', 'b.c', 'b.g', 'b.d.e.f', 'w.y']
+        ),
+    ):
+        eq_.description = "task name flattening: %s" % desc
+        yield eq_, _task_names(strings_to_tasks(input_)), output
+        del eq_.description
 
 
-def test_recursion_steps_into_nontask_modules():
-    """
-    Recursive loading will continue through modules with no tasks
-    """
-    module = fabfile('deep')
-    with path_prefix(module):
-        docs, funcs = load_fabfile(module)
-        eq_(len(funcs), 1)
-        ok_('submodule.subsubmodule.deeptask' in funcs)
+def test_crawl():
+    for desc, name, mapping, output in (
+        ("base case", 'a', {'a': 5}, 5),
+        ("one level", 'a.b', {'a': {'b': 5}}, 5),
+        ("deep", 'a.b.c.d.e', {'a': {'b': {'c': {'d': {'e': 5}}}}}, 5),
+        ("full tree", 'a.b.c', {'a': {'b': {'c': 5}, 'd': 6}, 'z': 7}, 5)
+    ):
+        eq_.description = "crawling dotted names: %s" % desc
+        yield eq_, _crawl(name, mapping), output
+        del eq_.description
 
 
-def test_newstyle_task_presence_skips_classic_task_modules():
+def test_mapping_task_classes():
     """
-    Classic-task-only modules shouldn't add tasks if any new-style tasks exist
+    Task classes implementing the mapping interface shouldn't break --list
     """
-    module = fabfile('deep')
-    with path_prefix(module):
-        docs, funcs = load_fabfile(module)
-        eq_(len(funcs), 1)
-        ok_('submodule.classic_task' not in funcs)
+    list_output('mapping', 'normal', COMMANDS_HEADER + """:\n
+    mapping_task""")
+
+
+def test_default_task_listings():
+    """
+    @task(default=True) should cause task to also load under module's name
+    """
+    for format_, expected in (
+        ('short', """mymodule
+mymodule.long_task_name"""),
+        ('normal', COMMANDS_HEADER + """:\n
+    mymodule
+    mymodule.long_task_name"""),
+        ('nested', COMMANDS_HEADER + NESTED_REMINDER + """:\n
+    mymodule:
+        long_task_name""")
+    ):
+        list_output.description = "Default task --list output: %s" % format_
+        yield list_output, 'default_tasks', format_, expected
+        del list_output.description
+
+
+def test_default_task_loading():
+    """
+    crawl() should return default tasks where found, instead of module objs
+    """
+    docs, tasks = load_fabfile(fabfile('default_tasks'))
+    ok_(isinstance(crawl('mymodule', tasks), Task))
+
+
+def test_aliases_appear_in_fab_list():
+    """
+    --list should include aliases
+    """
+    list_output('nested_alias', 'short', """nested.foo
+nested.foo_aliased""")

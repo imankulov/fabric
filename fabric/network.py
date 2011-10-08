@@ -10,16 +10,20 @@ import select
 import socket
 import sys
 
-from fabric.utils import abort
 from fabric.auth import get_password, set_password
+from fabric.utils import abort, handle_prompt_abort
 
 try:
     import warnings
     warnings.simplefilter('ignore', DeprecationWarning)
     import paramiko as ssh
-except ImportError:
-    abort("paramiko is a required module. Please install it:\n\t"
-          "$ sudo easy_install paramiko")
+except ImportError, e:
+    print >> sys.stderr, """There was a problem importing our SSH library. Specifically:
+
+    %s
+
+Please make sure all dependencies are installed and importable.""" % e
+    sys.exit(1)
 
 
 host_pattern = r'((?P<user>.+)@)?(?P<host>[^:]+)(:(?P<port>\d+))?'
@@ -68,9 +72,14 @@ class HostConnectionCache(dict):
         # Return the value either way
         return dict.__getitem__(self, real_key)
 
-    def __delitem__(self, key):
-        return dict.__delitem__(self, join_host_strings(*normalize(key)))
+    def __setitem__(self, key, value):
+        return dict.__setitem__(self, normalize_to_string(key), value)
 
+    def __delitem__(self, key):
+        return dict.__delitem__(self, normalize_to_string(key))
+
+    def __contains__(self, key):
+        return dict.__contains__(self, normalize_to_string(key))
 
 def normalize(host_string, omit_port=False):
     """
@@ -127,6 +136,13 @@ def join_host_strings(user, host, port=None):
     return "%s@%s%s" % (user, host, port_string)
 
 
+def normalize_to_string(host_string):
+    """
+    normalize() returns a tuple; this returns another valid host string.
+    """
+    return join_host_strings(*normalize(host_string))
+
+
 def connect(user, host, port):
     """
     Create and return a new SSHClient instance connected to given host.
@@ -170,6 +186,11 @@ def connect(user, host, port):
                 look_for_keys=not env.no_keys
             )
             connected = True
+
+            # set a keepalive if desired
+            if env.keepalive:
+                client.get_transport().set_keepalive(env.keepalive)
+
             return client
         # BadHostKeyException corresponds to key mismatch, i.e. what on the
         # command line results in the big banner error about man-in-the-middle
@@ -263,6 +284,7 @@ def prompt_for_password(prompt=None, no_colon=False, stream=None):
     defaults to ``sys.stderr``.
     """
     from fabric.state import env
+    handle_prompt_abort()
     stream = stream or sys.stderr
     # Construct prompt
     default = "[%s] Login password" % env.host_string
@@ -302,6 +324,7 @@ def needs_host(func):
     @wraps(func)
     def host_prompting_wrapper(*args, **kwargs):
         while not env.get('host_string', False):
+            handle_prompt_abort()
             host_string = raw_input("No hosts found. Please specify (single)"
                                     " host string for connection: ")
             interpret_host_string(host_string)
