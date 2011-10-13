@@ -18,11 +18,11 @@ import types
 
 from fabric import api, state  # For checking callables against the API, & easy mocking
 from fabric.contrib import console, files, project  # Ditto
-from fabric.network import denormalize, interpret_host_string, disconnect_all
-from fabric.state import commands, connections, env_options
-from fabric.tasks import Task
+from fabric.network import denormalize, disconnect_all
+from fabric.state import env_options
+from fabric.tasks import Task, execute
+from fabric.task_utils import _Dict, crawl
 from fabric.utils import abort, indent
-
 
 # One-time calculation of "all internal callables" to avoid doing this on every
 # check of a given fabfile callable (in is_classic_task()).
@@ -188,11 +188,6 @@ def load_tasks_from_module(imported):
     return imported.__doc__, new_style, classic, default
 
 
-# For attribute tomfoolery
-class _Dict(dict):
-    pass
-
-
 def extract_tasks(imported_vars):
     """
     Handle extracting tasks from a given list of variables
@@ -355,26 +350,6 @@ def _task_names(mapping):
         join = lambda x: ".".join((collection, x))
         tasks.extend(map(join, _task_names(module)))
     return tasks
-
-def _crawl(name, mapping):
-    """
-    ``name`` of ``'a.b.c'`` => ``mapping['a']['b']['c']``
-    """
-    key, _, rest = name.partition('.')
-    value = mapping[key]
-    if not rest:
-        return value
-    return _crawl(rest, value)
-
-def crawl(name, mapping):
-    try:
-        result = _crawl(name, mapping)
-        # Handle default tasks
-        if isinstance(result, _Dict) and getattr(result, 'default', False):
-            result = result.default
-        return result
-    except (KeyError, TypeError):
-        return None
 
 def _print_docstring(docstrings, name):
     if not docstrings:
@@ -547,63 +522,6 @@ def parse_remainder(arguments):
     return ' '.join(arguments)
 
 
-def _merge(hosts, roles, exclude=[]):
-    """
-    Merge given host and role lists into one list of deduped hosts.
-    """
-    # Abort if any roles don't exist
-    bad_roles = [x for x in roles if x not in state.env.roledefs]
-    if bad_roles:
-        abort("The following specified roles do not exist:\n%s" % (
-            indent(bad_roles)
-        ))
-
-    # Look up roles, turn into flat list of hosts
-    role_hosts = []
-    for role in roles:
-        value = state.env.roledefs[role]
-        # Handle "lazy" roles (callables)
-        if callable(value):
-            value = value()
-        role_hosts += value
-
-    # Return deduped combo of hosts and role_hosts, preserving order within
-    # them (vs using set(), which may lose ordering) and skipping hosts to be
-    # excluded.
-    cleaned_hosts = _clean_hosts(list(hosts) + list(role_hosts))
-    all_hosts = []
-    for host in cleaned_hosts:
-        if host not in all_hosts and host not in exclude:
-            all_hosts.append(host)
-    return all_hosts
-
-def _clean_hosts(host_list):
-    """
-    Clean host strings to ensure no trailing whitespace, etc.
-    """
-    return [host.strip() for host in host_list]
-
-def get_hosts(command, cli_hosts, cli_roles, cli_exclude_hosts):
-    """
-    Return the host list the given command should be using.
-
-    See :ref:`execution-model` for detailed documentation on how host lists are
-    set.
-    """
-    # Command line per-command takes precedence over anything else.
-    if cli_hosts or cli_roles:
-        return _merge(cli_hosts, cli_roles, cli_exclude_hosts)
-    # Decorator-specific hosts/roles go next
-    func_hosts = getattr(command, 'hosts', [])
-    func_roles = getattr(command, 'roles', [])
-    if func_hosts or func_roles:
-        return _merge(func_hosts, func_roles, cli_exclude_hosts)
-    # Finally, the env is checked (which might contain globally set lists from
-    # the CLI or from module-level code). This will be the empty list if these
-    # have not been set -- which is fine, this method should return an empty
-    # list if no hosts have been set anywhere.
-    return _merge(state.env['hosts'], state.env['roles'], state.env['exclude_hosts'])
-
 def update_output_levels(show, hide):
     """
     Update state.output values as per given comma-separated list of key names.
@@ -621,12 +539,7 @@ def update_output_levels(show, hide):
             state.output[key] = False
 
 
-def _run_task(task, args, kwargs):
-    # First, try class-based tasks
-    if hasattr(task, 'run') and callable(task.run):
-        return task.run(*args, **kwargs)
-    # Fallback to callable behavior
-    return task(*args, **kwargs)
+from fabric.tasks import _parallel_tasks
 
 
 def main():
@@ -752,30 +665,14 @@ Remember that -f can be used to specify fabfile path, and use -h for help.""")
             print("Commands to run: %s" % names)
 
         # At this point all commands must exist, so execute them in order.
-        for name, args, kwargs, cli_hosts, cli_roles, cli_exclude_hosts in commands_to_run:
-            # Get callable by itself
-            task = crawl(name, state.commands)
-            # Set current task name (used for some error messages)
-            state.env.command = name
-            # Set host list (also copy to env)
-            state.env.all_hosts = hosts = get_hosts(
-                task, cli_hosts, cli_roles, cli_exclude_hosts)
-            # If hosts found, execute the function on each host in turn
-            for host in hosts:
-                # Preserve user
-                prev_user = state.env.user
-                # Split host string and apply to env dict
-                username, hostname, port = interpret_host_string(host)
-                # Log to stdout
-                if state.output.running and not hasattr(command, 'return_value'):
-                    print("[%s] Executing task '%s'" % (host, name))
-                # Actually run command
-                _run_task(task, args, kwargs)
-                # Put old user back
-                state.env.user = prev_user
-            # If no hosts found, assume local-only and run once
-            if not hosts:
-                _run_task(task, args, kwargs)
+        for name, args, kwargs, arg_hosts, arg_roles, arg_exclude_hosts in commands_to_run:
+            execute(
+                name,
+                hosts=arg_hosts,
+                roles=arg_roles,
+                exclude_hosts=arg_exclude_hosts,
+                *args, **kwargs
+            )
         # If we got here, no errors occurred, so print a final note.
         if state.output.status:
             print("\nDone.")
